@@ -1,0 +1,3 @@
+go build -v -o webfuzz.a -buildmode=c-archive libfuzzer/fuzzapi.go
+clang++ -O1 -fno-omit-frame-pointer -gline-tables-only -DFUZZING_BUILD_MODE_UNSAFE_FOR_PRODUCTION -fsanitize=address -fsanitize-address-use-after-scope -fsanitize=fuzzer-no-link -stdlib=libc++ -fsanitize=fuzzer webfuzz.a -o fuzzweb
+
