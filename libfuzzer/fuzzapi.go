@@ -34,3 +34,5 @@ func LLVMFuzzerTestOneInput(data uintptr, size uint64) int {
 	// always return 0 as it is expected by libFuzzer
 	return 0
 }
+
+func main() {}

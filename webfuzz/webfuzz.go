@@ -6,6 +6,7 @@ import (
 	"bytes"
 	"fmt"
 	"io"
+	"io/ioutil"
 	"net/http"
 	"strings"
 	"unsafe"
@@ -15,15 +16,19 @@ const CoverSize = 0x10000
 
 var CoverTab = new([CoverSize]byte)
 
+var host = "http://localhost:8065/"
+
 //export WebfuzzInitialize
 func WebfuzzInitialize(coverTabPtr unsafe.Pointer, coverTabSize uint64) {
 	if coverTabSize != CoverSize {
 		panic("Incorrect cover tab size")
 	}
 	CoverTab = (*[CoverSize]byte)(coverTabPtr)
+	content, err := ioutil.ReadFile("host.txt")
+	if err == nil {
+		host = strings.TrimRight(string(content), "\r\n")
+	}
 }
-
-var host = "http://localhost:8065/"
 
 func unserializeRequest(input []byte) (*http.Request, error) {
 	if len(input) < 2 {
@@ -85,6 +90,8 @@ func unserializeRequest(input []byte) (*http.Request, error) {
 
 //export WebfuzzProcess
 func WebfuzzProcess(input []byte) int {
+	//show we have some coverage
+	CoverTab[0]++
 	req, err := unserializeRequest(input)
 	if err != nil {
 		return -1
@@ -92,7 +99,8 @@ func WebfuzzProcess(input []byte) int {
 	client := http.Client{}
 	resp, err := client.Do(req)
 	if err != nil {
-		panic(fmt.Sprintf("Request failed : %s", err))
+		//can happen with net/http: invalid header field name "\x00\x00\x00"
+		return -2
 	}
 
 	computeCoverage(req, resp)
@@ -109,10 +117,9 @@ func computeCoverage(req *http.Request, resp *http.Response) {
 		CoverTab[resp.StatusCode-99]++
 		if !seenCodes[resp.StatusCode-99] {
 			seenCodes[resp.StatusCode-99] = true
-			fmt.Println("NEW webfuzz status code %d", resp.StatusCode)
+			fmt.Printf("NEW webfuzz status code %d\n", resp.StatusCode)
 		}
 	} else {
-		CoverTab[0]++
 		panic(fmt.Sprintf("Unknown response code %d", resp.StatusCode))
 	}
 
