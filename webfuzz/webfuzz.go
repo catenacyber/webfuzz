@@ -1,7 +1,7 @@
 package webfuzz
 
 import (
-	"bytes"
+	"bufio"
 	"fmt"
 	"hash/crc32"
 	"io"
@@ -41,60 +41,27 @@ func WebfuzzInitialize(coverTabPtr unsafe.Pointer, coverTabSize uint64) {
 	}
 }
 
+func SerializeRequest(req *http.Request) ([]byte, error) {
+	req.Host = ""
+	rData, err := httputil.DumpRequest(req, true)
+	return rData, err
+}
+
 func UnserializeRequest(input []byte) (*http.Request, error) {
-	if len(input) < 2 {
-		return nil, io.EOF
-	}
-	method := ""
-	offset := 1
-	switch input[0] {
-	case 0:
-		method = "GET"
-	case 1:
-		method = "POST"
-	case 2:
-		method = "PUT"
-	case 3:
-		method = "HEAD"
-	default:
-		offset = bytes.IndexByte(input[1:], ' ')
-		if offset < 0 {
-			return nil, io.EOF
-		}
-		method = string(input[1 : 1+offset])
-		offset += 2
-	}
-	urilen := bytes.IndexByte(input[offset:], '\n')
-	if urilen < 0 {
-		return nil, io.EOF
-	}
-	uri := string(input[offset : offset+urilen])
-	offset += urilen + 1
-	hnames := make([]string, 0, 8)
-	hvalues := make([]string, 0, 8)
-	for offset < len(input) {
-		//TODO allow LF and colon in headers
-		hlen := bytes.IndexByte(input[offset:], '\n')
-		if hlen <= 0 {
-			break
-		}
-		header := string(input[offset : offset+hlen])
-		offset += hlen + 1
-		nv := strings.Split(header, ":")
-		if len(nv) < 2 {
-			return nil, io.EOF
-		}
-		hnames = append(hnames, nv[0])
-		hvalues = append(hvalues, strings.Join(nv[1:], ":"))
-	}
-	req, err := http.NewRequest(method, host+uri, bytes.NewReader(input[offset:]))
+	req, err := http.ReadRequest(bufio.NewReader(strings.NewReader(string(input))))
 	if err != nil {
-		return req, err
+		return nil, err
 	}
-	for i := 0; i < len(hnames); i++ {
-		req.Header.Add(hnames[i], hvalues[i])
+	req2, err := http.NewRequest(req.Method, host+req.RequestURI[1:], req.Body)
+	if err != nil {
+		return nil, err
 	}
-	return req, err
+	for name, _ := range req.Header {
+		if name != "Content-Length" {
+			req2.Header.Add(name, req.Header.Get(name))
+		}
+	}
+	return req2, err
 }
 
 func WebfuzzProcess(input []byte) int {
@@ -102,6 +69,7 @@ func WebfuzzProcess(input []byte) int {
 	CoverTab[0]++
 	req, err := UnserializeRequest(input)
 	if err != nil {
+		fmt.Printf("fail1 %s\n", err)
 		return -1
 	}
 	if debug {
@@ -113,6 +81,7 @@ func WebfuzzProcess(input []byte) int {
 	resp, err := client.Do(req)
 	if err != nil {
 		//can happen with net/http: invalid header field name "\x00\x00\x00"
+		fmt.Printf("fail2 %s\n", err)
 		return -2
 	}
 
@@ -160,11 +129,11 @@ func computeCoverage(req *http.Request, resp *http.Response, client *http.Client
 	if reproduce {
 		resp2, err := client.Do(req)
 		if err != nil {
-				fmt.Printf("Cannot reproduce request : %s\n", err)
-				for name, _ := range resp.Header {
-					reproducibleHeaders[name] = false
-				}
-				return
+			fmt.Printf("Cannot reproduce request : %s\n", err)
+			for name, _ := range resp.Header {
+				reproducibleHeaders[name] = false
+			}
+			return
 		}
 		for name, _ := range resp.Header {
 			_, seen := reproducibleHeaders[name]
