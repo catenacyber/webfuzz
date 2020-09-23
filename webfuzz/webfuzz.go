@@ -2,6 +2,7 @@ package webfuzz
 
 import (
 	"bufio"
+	"bytes"
 	"fmt"
 	"hash/crc32"
 	"io"
@@ -18,7 +19,7 @@ const CoverSize = 0x10000
 
 var CoverTab = new([CoverSize]byte)
 
-var host = "http://localhost:8065/"
+var host = "http://localhost:8065"
 
 var client *http.Client
 
@@ -47,12 +48,25 @@ func SerializeRequest(req *http.Request) ([]byte, error) {
 	return rData, err
 }
 
+func uriNorm(u string) string {
+	r := strings.ReplaceAll(u, "/./", "/")
+	l := len(r)
+	for {
+		r = strings.ReplaceAll(r, "//", "/")
+		if len(r) >= l {
+			break
+		}
+		l = len(r)
+	}
+	return r
+}
+
 func UnserializeRequest(input []byte) (*http.Request, error) {
 	req, err := http.ReadRequest(bufio.NewReader(strings.NewReader(string(input))))
 	if err != nil {
 		return nil, err
 	}
-	req2, err := http.NewRequest(req.Method, host+req.RequestURI[1:], req.Body)
+	req2, err := http.NewRequest(req.Method, host+uriNorm(req.RequestURI), req.Body)
 	if err != nil {
 		return nil, err
 	}
@@ -69,7 +83,6 @@ func WebfuzzProcess(input []byte) int {
 	CoverTab[0]++
 	req, err := UnserializeRequest(input)
 	if err != nil {
-		fmt.Printf("fail1 %s\n", err)
 		return -1
 	}
 	if debug {
@@ -78,14 +91,25 @@ func WebfuzzProcess(input []byte) int {
 			fmt.Printf("request %q\n", rData)
 		}
 	}
+	var rdr2 io.ReadCloser
+	if req.Body != nil {
+		buf, err := ioutil.ReadAll(req.Body)
+		if err != nil {
+			req.Body = nil
+		} else {
+			rdr1 := ioutil.NopCloser(bytes.NewBuffer(buf))
+			rdr2 = ioutil.NopCloser(bytes.NewBuffer(buf))
+			req.Body = rdr1
+		}
+	}
 	resp, err := client.Do(req)
 	if err != nil {
 		//can happen with net/http: invalid header field name "\x00\x00\x00"
-		fmt.Printf("fail2 %s\n", err)
 		return -2
 	}
+	CoverTab[0xFFFF]++
 
-	computeCoverage(req, resp, client)
+	computeCoverage(req, resp, client, rdr2)
 	io.Copy(ioutil.Discard, resp.Body)
 	resp.Body.Close()
 	return 0
@@ -94,10 +118,11 @@ func WebfuzzProcess(input []byte) int {
 var seenCodes = new([512]bool)
 var reproducibleHeaders = map[string]bool{}
 var alreadyCovered = new([65536]bool)
+var validUris = map[string]bool{}
 
-func computeCoverage(req *http.Request, resp *http.Response, client *http.Client) {
+func computeCoverage(req *http.Request, resp *http.Response, client *http.Client, rdr io.ReadCloser) {
 	//specific bypass
-	if resp.ContentLength == 3556 {
+	if resp.ContentLength == 3556 || resp.ContentLength < 0 {
 		return
 	}
 	//512 counters for status code coverage
@@ -111,23 +136,24 @@ func computeCoverage(req *http.Request, resp *http.Response, client *http.Client
 		fmt.Printf("Unknown response code %d\n", resp.StatusCode)
 		panic(fmt.Sprintf("Unknown response code %d", resp.StatusCode))
 	}
-	hoffset := uint32(512)
 
 	//resp headers names coverage
 	reproduce := false
 	for name, _ := range resp.Header {
 		h := crc32.ChecksumIEEE([]byte(name))
-		CoverTab[hoffset+(h&0xFFF)]++
+		CoverTab[h&0xFFFF]++
 		_, seen := reproducibleHeaders[name]
 		if !seen {
 			fmt.Printf("NEW webfuzz header %s\n", name)
 			reproduce = true
 		}
 	}
-	hoffset += 0x1000
 
 	if reproduce {
+		req.Body = rdr
 		resp2, err := client.Do(req)
+		io.Copy(ioutil.Discard, resp2.Body)
+		resp2.Body.Close()
 		if err != nil {
 			fmt.Printf("Cannot reproduce request : %s\n", err)
 			for name, _ := range resp.Header {
@@ -156,17 +182,21 @@ func computeCoverage(req *http.Request, resp *http.Response, client *http.Client
 		if seen && repro {
 			value := resp.Header.Get(name)
 			h := crc32.ChecksumIEEE([]byte(name + ":" + value))
-			CoverTab[hoffset+(h&0xFFF)]++
-			cov := alreadyCovered[hoffset+(h&0xFFF)]
+			CoverTab[h&0xFFFF]++
+			cov := alreadyCovered[h&0xFFFF]
 			if !cov {
-				alreadyCovered[hoffset+(h&0xFFF)] = true
+				alreadyCovered[h&0xFFFF] = true
 				fmt.Printf("Adding for header %s value %s\n", name, value)
 			}
 		}
 	}
-	hoffset += 0x1000
 
-	if resp.StatusCode < 300 {
+	_, validu := validUris[req.URL.Path]
+	if resp.StatusCode < 300 || validu {
+		if resp.StatusCode == 200 && !validu {
+			fmt.Printf("New valid uri %s\n", req.URL.Path)
+			validUris[req.URL.Path] = true
+		}
 		//uri coverage
 		uri := strings.Split(req.URL.Path, "/")
 		i := 0
@@ -176,28 +206,32 @@ func computeCoverage(req *http.Request, resp *http.Response, client *http.Client
 			}
 			h := crc32.ChecksumIEEE([]byte(strconv.Itoa(i) + p))
 			i++
-			CoverTab[hoffset+(h&0x3FFF)]++
-			cov := alreadyCovered[hoffset+(h&0x3FFF)]
+			CoverTab[h&0xFFFF]++
+			cov := alreadyCovered[h&0xFFFF]
 			if !cov {
-				alreadyCovered[hoffset+(h&0x3FFF)] = true
+				alreadyCovered[h&0xFFFF] = true
 				fmt.Printf("Adding for uri %s (%s) status %d\n", req.URL.Path, p, resp.StatusCode)
 			}
 
 		}
-		hoffset += 0x4000
-		if req.Method != "HEAD" {
+		hu := crc32.ChecksumIEEE([]byte(req.URL.Path))
+		hr := crc32.ChecksumIEEE([]byte(resp.Status))
+		CoverTab[(hu^hr)&0xFFFF]++
+		for name, _ := range resp.Header {
+			hh := crc32.ChecksumIEEE([]byte(name))
+			CoverTab[(hu^hh)&0xFFFF]++
+		}
+		/*if req.Method != "HEAD" && resp.StatusCode < 300 {
 			//resp body coverage
 			body, err := ioutil.ReadAll(resp.Body)
 			if err != nil {
 				fmt.Printf("Cannot read response body : %s", err)
 				panic(fmt.Sprintf("Cannot read response body : %s", err))
 			}
-			hu := crc32.ChecksumIEEE([]byte(req.URL.Path))
 			hb := crc32.ChecksumIEEE(body)
-			CoverTab[hoffset+((hu^hb)&0x7FFF)]++
-			hoffset += 0x8000
-		}
-	} else if resp.StatusCode >= 500 {
+			CoverTab[(hu^hb)&0xFFFF]++
+		}*/
+	} else if resp.StatusCode == 500 {
 		fmt.Printf("Server crashed with %d", resp.StatusCode)
 		panic(fmt.Sprintf("Server crashed with %d", resp.StatusCode))
 	}
