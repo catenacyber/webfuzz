@@ -34,11 +34,12 @@ func main() {
 					req, err := http.ReadRequest(bufio.NewReader(strings.NewReader(string(tcp.Payload))))
 					if err != nil {
 						fmt.Printf("Error reading request %s\n", err)
+						continue
 					}
 					data, err := webfuzz.SerializeRequest(req)
 					if err != nil {
 						fmt.Printf("Failed serializing request\n")
-						panic(err)
+						continue
 					}
 					fname := os.Args[2] + "/" + fmt.Sprintf("%x", sha1.Sum(data))
 					err = ioutil.WriteFile(fname, data, 0644)

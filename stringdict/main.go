@@ -7,6 +7,7 @@ import (
 	"go/token"
 	"os"
 	"strings"
+	"unicode"
 )
 
 func main() {
@@ -29,11 +30,27 @@ func main() {
 			if x.Kind == token.STRING {
 				s = x.Value
 			}
+		case *ast.GenDecl:
+			if x.Tok == token.IMPORT {
+				//exclude imported packages
+				return false
+			}
 		}
-		if len(s) > 3 {
+		if len(s) > 4 {
 			name := fset.Position(n.Pos()).String()
 			name = strings.Replace(name, ".go", "", 1)
 			name = strings.ReplaceAll(name, ":", "_")
+			if s[0] != '"' || s[len(s)-1] != '"' {
+				return true
+			}
+			if strings.Contains(s, "\\") {
+				return true
+			}
+			for i := 0; i < len(s); i++ {
+				if s[i] > unicode.MaxASCII {
+					return false
+				}
+			}
 			fmt.Printf("%s=%s\n", name, s)
 		}
 		return true
